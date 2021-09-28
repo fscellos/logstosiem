@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logtosiem
+  namespace: logtosiem
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      run: logtosiem
+  template:
+    metadata:
+      labels:
+        run: logtosiem
+    spec:
+      containers:
+        - image: logtosiem
+          imagePullPolicy: IfNotPresent
+          name: logtosiem
+      serviceAccountName: logtosiem
