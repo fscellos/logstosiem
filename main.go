@@ -19,10 +19,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +38,9 @@ import (
 )
 
 var wg sync.WaitGroup // Synchronisation des goroutines en charge de la lecture sur les différentes pods du service
+const REGEXP = "^(WHO|WHAT|ACTION|APPLICATION|WHEN|CLIENT IP ADDRESS|SERVER IP ADDRESS): (.*)"
+
+var compileRegex *regexp.Regexp
 
 type PodLog struct {
 	Namespace     string
@@ -48,6 +54,25 @@ type PodLogControl struct {
 	StopCollecteur chan struct{}
 	PodNames       map[string]struct{}
 	ClientSet      *kubernetes.Clientset
+}
+
+// Message formaté pour le système Siem
+type SiemMessage struct {
+	PodName     string `json:"podname"`
+	WHO         string `json:"who"`
+	WHAT        string `json:"what"`
+	ACTION      string `json:"action"`
+	APPLICATION string `json:"application"`
+	WHEN        string `json:"when"`
+	CLIENTIP    string `json:"clientip"`
+	SERVERIP    string `json:"serverip"`
+}
+
+// Send back true if all fields of SiemMessage is complete
+func (sm *SiemMessage) isComplete() bool {
+	complete := false
+	complete = sm.ACTION != "" && sm.APPLICATION != "" && sm.CLIENTIP != "" && sm.SERVERIP != "" && sm.WHAT != "" && sm.WHEN != "" && sm.WHO != ""
+	return complete
 }
 
 var SERVICE = "test"
@@ -92,7 +117,9 @@ func (podLog *PodLog) GetPodLogs(ctx context.Context, quitChannel chan struct{})
 		return err
 	}
 	defer stream.Close() // Le stream et fermé quand la méthode termine son exécution
-
+	var siemMessage = SiemMessage{
+		PodName: podLog.PodName,
+	}
 	for {
 		select {
 		case <-quitChannel: // Channel de terminaison Si il est clos on decrease la synchronisation et on quitte la goroutine
@@ -113,7 +140,7 @@ func (podLog *PodLog) GetPodLogs(ctx context.Context, quitChannel chan struct{})
 			}
 			message := string(buf[:numBytes])
 			if len(message) > 0 {
-				fmt.Println(message) // Et on traite les logs en question pour les transformer et les envoyer ailleurs (ie. kafka)
+				siemMessage, _ = parseAndSend(message, siemMessage) // Et on traite les logs en question pour les transformer et les envoyer ailleurs (ie. kafka)
 			}
 		}
 	}
@@ -215,6 +242,15 @@ func processCurrentPods(clientset *kubernetes.Clientset, quitChannel chan struct
 }
 
 func main() {
+
+	// Compilation expression régulière de reherche
+	var compError error
+	compileRegex, compError = regexp.Compile(REGEXP)
+	if compError != nil {
+		fmt.Println("Problème lors de la compilation de l'expression régulière")
+		panic(compError)
+	}
+
 	// creates the in-cluster config
 	// config, err := rest.InClusterConfig()
 	// if err != nil {
@@ -258,4 +294,45 @@ func main() {
 			fmt.Println("On relance donc de zero le processing de traitement des nouveaux pods")
 		}
 	}
+}
+
+func parseAndSend(message string, existingSiemMessage SiemMessage) (SiemMessage, error) {
+
+	// On splitte les retours chariots
+	lines := strings.Split(message, "\n")
+	for _, line := range lines {
+		matches := compileRegex.FindStringSubmatch(line)
+		if matches != nil {
+			switch matches[1] {
+			case "WHO":
+				existingSiemMessage.WHO = matches[2]
+			case "WHAT":
+				existingSiemMessage.WHAT = matches[2]
+			case "ACTION":
+				existingSiemMessage.ACTION = matches[2]
+			case "APPLICATION":
+				existingSiemMessage.APPLICATION = matches[2]
+			case "WHEN":
+				existingSiemMessage.WHEN = matches[2]
+			case "CLIENT IP ADDRESS":
+				existingSiemMessage.CLIENTIP = matches[2]
+			case "SERVER IP ADDRESS":
+				existingSiemMessage.SERVERIP = matches[2]
+			}
+			if existingSiemMessage.isComplete() { // Si le message est complet on l'envoit
+				sendToKafka(existingSiemMessage)
+				existingSiemMessage = SiemMessage{
+					PodName: existingSiemMessage.PodName,
+				} // Et on le réinitialise pour la prochaine log
+			}
+		}
+	}
+
+	return existingSiemMessage, nil // A alimenter correctement avec un vrai SiemMessage
+}
+
+func sendToKafka(siemMessage SiemMessage) error {
+	marshalsiemfordebug, _ := json.Marshal(siemMessage)
+	fmt.Println(string(marshalsiemfordebug))
+	return nil
 }
