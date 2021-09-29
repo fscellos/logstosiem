@@ -36,9 +36,6 @@ import (
 
 var wg sync.WaitGroup // Synchronisation des goroutines en charge de la lecture sur les différentes pods du service
 
-// const SERVICE = "cas"
-// const CONTAINER_NAME = "cas"
-
 type PodLog struct {
 	Namespace     string
 	PodName       string
@@ -48,19 +45,21 @@ type PodLog struct {
 }
 
 type PodLogControl struct {
-	Annulation context.CancelFunc
-	PodNames   map[string]struct{}
-	ClientSet  *kubernetes.Clientset
+	StopCollecteur chan struct{}
+	PodNames       map[string]struct{}
+	ClientSet      *kubernetes.Clientset
 }
 
-const SERVICE = "sadirah-courrier"
-const CONTAINER_NAME = "changereactor"
-const NAMESPACE = "sadirah-workflow-thd"
+var SERVICE = "test"
+var CONTAINER_NAME = "test"
+var NAMESPACE = "test"
+var WATCH_PERIOD int64 = 10 // Periode de vérification des changements
 
 // Récupération des Pods associés à un service. Utiliation des labels selector pour determiner les pods cibles
+// Méthode OK
 func GetPodForService(ctx context.Context, namespace string, serviceName string, clientSet *kubernetes.Clientset) (error, *v1.PodList) {
 	options := metav1.GetOptions{}
-	service, err := clientSet.CoreV1().Services(namespace).Get(context.TODO(), serviceName, options)
+	service, err := clientSet.CoreV1().Services(namespace).Get(ctx, serviceName, options)
 	// Il faut récupérer le selector dans le service et cela permettra de rechercher les PODS correspondant avec le selector
 	if err != nil {
 		return err, nil
@@ -72,16 +71,13 @@ func GetPodForService(ctx context.Context, namespace string, serviceName string,
 	optionsPods := metav1.ListOptions{
 		LabelSelector: set.AsSelector().String(),
 	}
-	pods, err := clientSet.CoreV1().Pods(namespace).List(context.TODO(), optionsPods)
+	pods, err := clientSet.CoreV1().Pods(namespace).List(ctx, optionsPods)
 
 	return nil, pods
 }
 
 // Lecture de la log des pods pour le container donné
-func (podLog *PodLog) GetPodLogs(ctx context.Context, logchannel chan string) error {
-	defer wg.Done() // On ferme le point de synchronisation empêchant la routine principale de s'arrêter tant qu'on capte des
-	// logs dans des pods
-
+func (podLog *PodLog) GetPodLogs(ctx context.Context, quitChannel chan struct{}) error {
 	count := int64(100)
 	podLogOptions := v1.PodLogOptions{
 		Container: podLog.ContainerName,
@@ -96,54 +92,58 @@ func (podLog *PodLog) GetPodLogs(ctx context.Context, logchannel chan string) er
 		return err
 	}
 	defer stream.Close() // Le stream et fermé quand la méthode termine son exécution
+
 	for {
-		buf := make([]byte, 2000)
-		numBytes, err := stream.Read(buf)
-		if numBytes == 0 {
-			continue
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		message := string(buf[:numBytes])
-		logchannel <- message
-		// Un bloc select bloc jusqu'à ce que l'une des opérations puissent se faire
-		// Tant qu'on log c'est ok pour le cas 1
-		// Si on écrit dans le channel associé au Cancel context, le channel de sortie est fermé et on sort de la fonction (fin de la goroutine)
 		select {
-		case <-ctx.Done():
-			fmt.Print("On sort de la goroutine")
-			logchannel <- "On sort de la goroutine"
-			//close(logchannel)
+		case <-quitChannel: // Channel de terminaison Si il est clos on decrease la synchronisation et on quitte la goroutine
+			fmt.Println("Lecture du pod " + podLog.PodName + " il faut qu'on quitte")
+			wg.Done() // Permettra la libération de la routine principale permettant de relancer une consulation
 			return nil
+		default: // Sinon on continue la lecture des logs
+			buf := make([]byte, 2000)
+			numBytes, err := stream.Read(buf)
+			if numBytes == 0 {
+				continue
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			message := string(buf[:numBytes])
+			if len(message) > 0 {
+				fmt.Println(message) // Et on traite les logs en question pour les transformer et les envoyer ailleurs (ie. kafka)
+			}
 		}
 	}
-	return nil
 }
 
 // Permet de contrôler les loggers de pods. Lancer un traitement toutes les minutes
 // Pour checker que les pods sont bien en vie. Sinon relance la recherche et collecte
 func (plc *PodLogControl) ControlPodLogger() error {
 	// On lance un ticker pour l'exécution péridique
-	eachMinutes := time.NewTicker(60 * time.Second)
+	eachMinutes := time.NewTicker(time.Duration(WATCH_PERIOD) * time.Second)
 	for {
 		select {
-		case <-eachMinutes.C:
-			Processing(plc)
+		case <-eachMinutes.C: // Channel en lecture seul, appelé tous les WATCH_PERIOD secondes
+			if cancel, _ := Processing(plc); cancel { // En cas de signal de fin, on arrête le timer et on stop la goroutine
+				fmt.Println("On arrete le timer")
+				eachMinutes.Stop()
+				return nil
+			}
 		}
 	}
-	return nil
 }
 
 // Traitement de vérification/relance éventuelle
-func Processing(plc *PodLogControl) error {
+func Processing(plc *PodLogControl) (bool, error) {
 	err, pods := GetPodForService(context.TODO(), NAMESPACE, SERVICE, plc.ClientSet)
 	if err != nil {
 		panic(err.Error())
 	}
+
+	// Si l'un des pods a disparu on annule tout et on recommence
 	cancellation := false
 	for _, pod := range pods.Items {
 		if pod.ObjectMeta.DeletionTimestamp == nil { // Uniquement si le pod est actif
@@ -154,37 +154,30 @@ func Processing(plc *PodLogControl) error {
 	}
 
 	if cancellation {
-		fmt.Print("Il va falloir annuler car nous ne sommes plus sur les bons pods")
-		// On déclenche l'annulation du contexte qui doit avoir comme effet l'arrêt des goroutines
-		// de captation de logs
-		for j := 0; j < len(plc.PodNames); j++ {
-			plc.Annulation()
-		}
+		fmt.Println("Il va falloir annuler car nous ne sommes plus sur les bons pods")
+		// On ferme le channel "quit" pour déclencher la sortie de toutes les goroutines et relancer une recherche
+		// de pod dans la boucle principale
+		fmt.Println("On envoi le signal d'annulation")
+		close(plc.StopCollecteur) // Clos le channel de terminaison qui va arrêter les routines de collecte, la routine de contrôle et relancer
+		// une recherche de collecte depuis la fonction main
+		return true, nil
 	}
-
-	return nil
-
+	return false, nil
 }
 
 // Boucle de traitement qui va être réappelée à chaque fois que l'un des pods est modifié
 // Pour adapter le nombre ou le paramétrage en charge du suivi des logs pour chaque pods
-func processCurrentPods(clientset *kubernetes.Clientset) {
-	// Création d'un context pour permettre l'annulation des goroutines de log si la
-	// goroutine de contrôle détecte une modifications dans les pods associés au service
-	ctx, fn := context.WithCancel(context.TODO())
+func processCurrentPods(clientset *kubernetes.Clientset, quitChannel chan struct{}) {
+	// Création d'un context simple car on passera par un channel fermé pour annuler la lecture des logs
+	ctx := context.TODO()
 
-	// test pour la récupération des pods associés à un service "cas"
+	// Récupération des pods associés à un service
 	err, pods := GetPodForService(ctx, NAMESPACE, SERVICE, clientset)
 	if err != nil {
 		panic(err.Error())
 	}
 
-	// Channel pour la récupération des logs dans la boucle principale
-	logchannel := make(chan string)
-	compteurToNotLog := 0
-
 	podsName := make(map[string]struct{})
-	count := 0
 	for _, pod := range pods.Items {
 		podLog := &PodLog{
 			Namespace:     NAMESPACE,
@@ -193,33 +186,32 @@ func processCurrentPods(clientset *kubernetes.Clientset) {
 			Follow:        true,
 			ClientSet:     clientset,
 		}
+		// Si le Pod est terminating on ne log pas dessus
 		if pod.ObjectMeta.DeletionTimestamp == nil {
-			wg.Add(1)
 			podsName[pod.Name] = struct{}{}
-			count++
-			go podLog.GetPodLogs(ctx, logchannel)
-		} else {
-			compteurToNotLog++
+			fmt.Println("Lancement collecte log pour " + pod.Name)
+			wg.Add(1)                              // On suit les différents collecteurs de log (dans le main permet de redéclencher une recherche si chgt d'éat)
+			go podLog.GetPodLogs(ctx, quitChannel) // On lance la goroutine qui va suivre le pod
 		}
 	}
 	// On lance la goroutine de contrôle qui va vérifier qu'il ne faut pas terminer les goroutines qui récupèrent
-	//les logs sur des pods qui peuvent être terminés. Le second chiffre correspond au nombre de halt nécessaires
+	//les logs sur des pods qui peuvent être terminés.
 	podLogControl := &PodLogControl{
-		Annulation: fn,
-		PodNames:   podsName,
-		ClientSet:  clientset,
+		StopCollecteur: quitChannel, // Channel d'interruption si chgt dans les pods suivis
+		PodNames:       podsName,    // Les pods qu'on suit actuellement pour comparaison avec l'état du système
+		ClientSet:      clientset,   // Le client k8s
 	}
+	fmt.Println("Lancement goroutine de controle")
 	go podLogControl.ControlPodLogger()
 
-	// for i := range logchannel {
-	// 	// Here we can process string send by goroutine
-	// 	fmt.Print(i)
-	// }
+	// Boucle bloquante tant que le channel de terminaison n'est pas clos(ie. personne n'écrit dessus)
 	for {
-		fmt.Print(<-logchannel)
+		select {
+		case <-quitChannel:
+			fmt.Println("On quitte la boucle e contrôle")
+			return
+		}
 	}
-
-	wg.Wait()
 }
 
 func main() {
@@ -249,10 +241,21 @@ func main() {
 		panic(err.Error())
 	}
 
-	// On appelle indéfiniment le même traitement
+	// On boucle sur la création d'un channel de terminaison (qui nous bloquera dans la boucle)
+	// Et on lance le traitement de recherches des pods et de collecte des logs
 	for {
-		processCurrentPods(clientset)
-	}
+		// On créé le channel qui sera fermé en cas de changement et qui permettra de relancer
+		// le traitement de recherche des pods et a collecte des logs
+		quitChannel := make(chan struct{})
 
-	fmt.Print("Ok on sort du programme en ayant arrête les go routines")
+		// On appelle traitement de collecte
+		processCurrentPods(clientset, quitChannel)
+
+		select {
+		case <-quitChannel: // On lit le channel de terminaison. Il est bloquant tant qu'il n'est pas fermé.
+			fmt.Println("Réception d'un signal de terminaison car l'état des pods a bougé")
+			wg.Wait() // POint de synchronisation ouvert lorsque les pods de lecture seront tous terminés
+			fmt.Println("On relance donc de zero le processing de traitement des nouveaux pods")
+		}
+	}
 }
