@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/segmentio/kafka-go"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -38,9 +39,17 @@ import (
 )
 
 var wg sync.WaitGroup // Synchronisation des goroutines en charge de la lecture sur les différentes pods du service
+var compileRegex *regexp.Regexp
+var kafkaConn *kafka.Conn
+var SERVICE = "test"
+var CONTAINER_NAME = "test"
+var NAMESPACE = "test"
+var WATCH_PERIOD int64 = 10 // Periode de vérification des changements
 const REGEXP = "^(WHO|WHAT|ACTION|APPLICATION|WHEN|CLIENT IP ADDRESS|SERVER IP ADDRESS): (.*)"
 
-var compileRegex *regexp.Regexp
+// Kafka configuration
+const KAFKA_BROKER_ADRESSE = "10.37.180.52:9092"
+const KAFKA_TOPIC = "testtopic"
 
 type PodLog struct {
 	Namespace     string
@@ -74,11 +83,6 @@ func (sm *SiemMessage) isComplete() bool {
 	complete = sm.ACTION != "" && sm.APPLICATION != "" && sm.CLIENTIP != "" && sm.SERVERIP != "" && sm.WHAT != "" && sm.WHEN != "" && sm.WHO != ""
 	return complete
 }
-
-var SERVICE = "test"
-var CONTAINER_NAME = "test"
-var NAMESPACE = "test"
-var WATCH_PERIOD int64 = 10 // Periode de vérification des changements
 
 // Récupération des Pods associés à un service. Utiliation des labels selector pour determiner les pods cibles
 // Méthode OK
@@ -235,13 +239,15 @@ func processCurrentPods(clientset *kubernetes.Clientset, quitChannel chan struct
 	for {
 		select {
 		case <-quitChannel:
-			fmt.Println("On quitte la boucle e contrôle")
+			fmt.Println("On quitte la boucle de contrôle")
 			return
 		}
 	}
 }
 
 func main() {
+	// Configuration kafka
+	kafkaConfiguration()
 
 	// Compilation expression régulière de reherche
 	var compError error
@@ -333,6 +339,30 @@ func parseAndSend(message string, existingSiemMessage SiemMessage) (SiemMessage,
 
 func sendToKafka(siemMessage SiemMessage) error {
 	marshalsiemfordebug, _ := json.Marshal(siemMessage)
-	fmt.Println(string(marshalsiemfordebug))
+
+	_, err := kafkaConn.WriteMessages(kafka.Message{
+		Value: marshalsiemfordebug,
+	})
+	if err != nil {
+		fmt.Printf("Erreur pendant l'envoi du message", err.Error())
+		return err
+	} else {
+		fmt.Println("OK écriture du message dans kafka")
+	}
+
+	return nil
+}
+
+// Initialisation du client kafka
+func kafkaConfiguration() error {
+
+	conn, err := kafka.DialLeader(context.TODO(), "tcp", KAFKA_BROKER_ADRESSE, KAFKA_TOPIC, 0)
+	if err != nil {
+		fmt.Printf("Erreur lors de la connexion au kafka " + err.Error())
+		panic(err)
+	}
+	kafkaConn = conn
+
+	//kafkaConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return nil
 }

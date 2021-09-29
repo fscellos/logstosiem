@@ -1,0 +1,7 @@
+Pour consomer depuis le topic :
+docker run --rm hub.valentine.private.sfr.com/dockerhub/confluentinc/cp-kafkacat:5.4.1 kafkacat -b 10.37.180.52:9092 -t testtopic -C
+
+Pour ecrire dans le topic depuis un ficheir
+docker run --rm -v $(pwd):/host hub.valentine.private.sfr.com/dockerhub/confluentinc/cp-kafkacat:5.4.1 kafkacat -b 10.37.180.52:9092 -t testtopic -P -l /host/msgs.txt
+
+Note : L'IP utilisée est une interface de la machine. C'est aussi cele qui est définie comme interface d'écoute pour le broker kafka dans le docker-compose

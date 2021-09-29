@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: test
+  labels:
+    run: test
+  name: test
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 50%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      run: test
+  template:
+    metadata:
+      labels:
+        run: test
+    spec:
+      containers:
+        - image: test:V1
+          imagePullPolicy: IfNotPresent
+          name: test
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test
+  namespace: test
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    run: test
