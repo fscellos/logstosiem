@@ -246,6 +246,8 @@ func processCurrentPods(clientset *kubernetes.Clientset, quitChannel chan struct
 }
 
 func main() {
+	// RESTE A INTEGRER UN SYSTEME DE LOG SIMPLE, LA CONFIGURATION ET KUSTOMIZE
+
 	// Configuration kafka
 	kafkaConfiguration()
 
@@ -363,6 +365,5 @@ func kafkaConfiguration() error {
 	}
 	kafkaConn = conn
 
-	//kafkaConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return nil
 }
