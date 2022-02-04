@@ -1,0 +1,6 @@
+harbor:
+  url: https://hostname/api
+  login: admin
+  password: Harbor12345
+
+additional_trusted_ca_dir: UNSET

@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: labgo
+  namespace: labgo
+spec:
+  template:
+    spec:
+      containers:
+        - image: lanouvelleimage
+          name: lanouvelleimage

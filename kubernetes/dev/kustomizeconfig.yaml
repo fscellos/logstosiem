@@ -1,0 +1,12 @@
+# Allow modification of specs fields for generated configmap
+nameReference:
+- kind: ConfigMap
+  version: v1
+  fieldSpecs:
+  - kind: Pod
+    version: v1
+    path: spec/volumes/configMap/name
+  - kind: Deployment
+    path: spec/template/spec/volumes/configMap/name
+-   kind: Job
+    path: spec/template/spec/volumes/configMap/name

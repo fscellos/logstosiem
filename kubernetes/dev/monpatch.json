@@ -1,0 +1,5 @@
+[
+    {"op": "replace",
+     "path": "/spec/template/spec/containers/1/name",
+     "value": "IMAGE_MODIFIE"}
+]

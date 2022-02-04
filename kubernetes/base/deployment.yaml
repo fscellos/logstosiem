@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: labgo
+  namespace: labgo
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      run: labgo
+  template:
+    metadata:
+      labels:
+        run: labgo
+    spec:
+      containers:
+        - image: labgo
+          imagePullPolicy: IfNotPresent
+          name: labgo
+      serviceAccountName: labgo

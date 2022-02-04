@@ -1,0 +1,16 @@
+keycloak:
+  realm: nauarkhos
+  client_id: nauarkhos
+  client_secret: client-secret
+  Url: https://keycloak.nauarkhos.dev
+  custom_ca_cert: hack/cert-webhook/ca.crt
+
+harbor:
+  url: https://harbor.nauarkhos.dev/api
+  login: admin
+  password: Harbor12345
+
+# for dev: make deploy-dev get certificate from k8s secret
+#webhook_cert_dir: hack/cert-webhook
+# Above configuration is useful to access untrusted generate certificate of some test resources (like harbor)
+#additional_trusted_ca_dir: UNSET
